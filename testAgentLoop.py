@@ -11,30 +11,18 @@ import queue
 from vosk import Model, KaldiRecognizer
 import os
 
+from dotenv import load_dotenv
+load_dotenv()
+
 VOICE = os.getenv("VOICE_PATH")
-PIPER = os.getenv("PIPER_PATH")
-# VOSK = os.getenv("VOSK_PATH")
+# If PIPER_PATH isn't set, assume the system-wide 'piper' command (Linux)
+PIPER = os.getenv("PIPER_PATH", "piper") 
+VOSK = os.getenv("VOSK_PATH")
 
-# model = Model(VOSK)
-# recognizer = KaldiRecognizer(model, 16000)
+USER_AUDIO = True if VOSK else False
 
-# def callback(indata, frames, time, status):
-#     if recognizer.AcceptWaveform(bytes(indata)):
-#         result = json.loads(recognizer.Result())
-#         print("Final:", result.get("text", ""))
-#     else:
-#         partial = json.loads(recognizer.PartialResult())
-#         print("Partial:", partial.get("partial", ""))
-
-# with sd.RawInputStream(samplerate=16000, blocksize=4000, dtype='int16',
-#                        channels=1, callback=callback):
-#     print("Listening...")
-#     while True:
-#         pass
-
-# exit()
-
-AGENT_SPEAKING = True if VOICE and PIPER else False
+AGENT_AUDIO = True if VOICE and PIPER else False
+AGENT_SPEAKING = AGENT_AUDIO
 
 user_speech_queue = queue.Queue()
 agent_speech_queue = queue.Queue()
@@ -63,6 +51,7 @@ def play_audio_async(audio):
     agent_speech_queue.put(audio)
 
 def get_audio_data(text: str, voice_path=VOICE):
+    # LINUX PORT FIX: Ensures subprocess uses the binary path or system command strings correctly
     process = subprocess.Popen(
         [PIPER, "--quiet", "--model", voice_path, "--output_raw"],
         stdin=subprocess.PIPE,
@@ -122,13 +111,9 @@ class testCallbacks(Callbacks):
     
     def on_message(self, msg):
         self.messages.append(msg)
-        # print(msg)
-        # if (msg.get("role") == "assistant" and msg.get("content")):
-        #     play_audio(get_audio_data(msg["content"]), get_sample_rate(VOICE))
 
     def speak(self):
         if self.buffer:
-            # play_audio(get_audio_data(self.buffer), get_sample_rate())
             play_audio_async(get_audio_data(self.buffer))
             self.buffer = ""
     
@@ -152,7 +137,6 @@ def run_agent(
     system_prompt: str = SYSTEM_PROMPT,
     model_name: str = "qwen2.5",
 ):
-    # Build working message list
     callbacks.on_start()
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(conversation_history)
@@ -161,16 +145,13 @@ def run_agent(
 
     full_response = ""
 
+    ollama_tools = []
+    for _, tool in tools.items():
+        ollama_tools.append({
+            "type": "function",
+            "function": tool["schema"]
+        })
     while True:
-        # Convert tool definitions to Ollama schema
-        ollama_tools = []
-        for name, tool in tools.items():
-            ollama_tools.append({
-                "type": "function",
-                "function": tool["schema"]
-            })
-
-        # Start streaming
         stream = ollama.chat(
             model=model_name,
             messages=messages,
@@ -186,13 +167,11 @@ def run_agent(
             for chunk in stream:
                 msg = chunk["message"]
 
-                # Text delta
                 if "content" in msg and msg["content"]:
                     token = msg["content"]
                     current_text += token
                     callbacks.on_token(token)
 
-                # Tool call
                 if "tool_calls" in msg:
                     for tc in msg["tool_calls"]:
                         tool_calls.append(tc)
@@ -204,21 +183,17 @@ def run_agent(
             if not current_text:
                 raise e
 
-        # Emit assistant message
         callbacks.on_message({"role": "assistant", "content": current_text})
         full_response += current_text
 
-        # Recovery if no output
         if stream_error and not current_text:
             full_response = "I couldn't generate a response. Try rephrasing your message."
             break
 
-        # If no tool calls, conversation ends
         if not tool_calls:
             messages.append({"role": "assistant", "content": current_text})
             break
 
-        # Handle tool calls
         for tc in tool_calls:
             tool_name = tc["function"]["name"]
             args = tc["function"]["arguments"]
@@ -227,20 +202,17 @@ def run_agent(
             if not tool_def:
                 continue
 
-            # Optional approval
             if tool_def.get("needs_approval"):
                 approved = callbacks.on_tool_approval(tool_name, args)
                 if not approved:
                     return full_response
 
-            # Execute tool
             try:
                 result = tool_def["fn"](**args)
             except Exception as e:
                 result = str(e)
             callbacks.on_tool_call_end(tool_name, result)
 
-            # Insert tool result into messages
             messages.append({
                 "role": "assistant",
                 "tool_calls": [tc]
@@ -264,11 +236,13 @@ def run_agent(
     return full_response
 
 if __name__ == "__main__":
-    # start_listener(VOSK)
     callbacks = testCallbacks(speaking=False)
-    while (inp:=input("> ")):
-        run_agent(inp, callbacks.messages, callbacks)
-        print()
-    # while True:
-    #     text = user_speech_queue.get()
-    #     run_agent(text, callbacks.messages, callbacks)
+    if USER_AUDIO:
+        start_listener(VOSK)
+        while True:
+            text = user_speech_queue.get()
+            run_agent(text, callbacks.messages, callbacks)
+    else:
+        while (inp:=input("> ")):
+            run_agent(inp, callbacks.messages, callbacks)
+            print()
