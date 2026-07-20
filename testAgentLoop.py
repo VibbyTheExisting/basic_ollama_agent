@@ -10,9 +10,12 @@ import threading
 import queue
 from vosk import Model, KaldiRecognizer
 import os
+import sys
 
 from dotenv import load_dotenv
 load_dotenv()
+
+DEFAULT_MODEL = "qwen2.5"
 
 VOICE = os.getenv("VOICE_PATH")
 # If PIPER_PATH isn't set, assume the system-wide 'piper' command (Linux)
@@ -135,13 +138,16 @@ def run_agent(
     callbacks,
     tools: dict = tools,
     system_prompt: str = SYSTEM_PROMPT,
-    model_name: str = "qwen2.5",
+    model_name: str = "",
 ):
     callbacks.on_start()
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_message})
     callbacks.on_message({"role": "user", "content": user_message})
+
+    if (not model_name):
+        model_name = DEFAULT_MODEL
 
     full_response = ""
 
@@ -236,13 +242,15 @@ def run_agent(
     return full_response
 
 if __name__ == "__main__":
+    model_name = sys.argv[1] if len(sys.argv > 1) else ""
+
     callbacks = testCallbacks(speaking=False)
     if USER_AUDIO:
         start_listener(VOSK)
         while True:
             text = user_speech_queue.get()
-            run_agent(text, callbacks.messages, callbacks)
+            run_agent(text, callbacks.messages, callbacks, model_name=model_name)
     else:
         while (inp:=input("> ")):
-            run_agent(inp, callbacks.messages, callbacks)
+            run_agent(inp, callbacks.messages, callbacks, model_name=model_name)
             print()
