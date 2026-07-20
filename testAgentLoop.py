@@ -242,7 +242,7 @@ def run_agent(
     return full_response
 
 if __name__ == "__main__":
-    model_name = sys.argv[1] if len(sys.argv > 1) else ""
+    model_name = sys.argv[1] if len(sys.argv) > 1 else ""
 
     callbacks = testCallbacks(speaking=False)
     if USER_AUDIO:
