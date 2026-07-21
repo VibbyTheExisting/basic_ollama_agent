@@ -82,9 +82,12 @@ def start_listener(model_path):
             # Partial results
             pass
 
+    input_device = sd.query_devices(kind='input')
+    sample_rate = int(input_device['default_samplerate'])
+
     def listen():
         with sd.RawInputStream(
-            samplerate=16000,
+            samplerate=sample_rate,
             blocksize=4000,
             dtype='int16',
             channels=1,
