@@ -11,10 +11,13 @@ import queue
 from vosk import Model, KaldiRecognizer
 import os
 import sys
+from scipy.signal import resample_poly
+from math import gcd
 
 from dotenv import load_dotenv
 load_dotenv()
 
+TARGET_RATE = 16000
 DEFAULT_MODEL = "qwen2.5"
 
 VOICE = os.getenv("VOICE_PATH")
@@ -25,7 +28,7 @@ VOSK = os.getenv("VOSK_PATH")
 USER_AUDIO = True if VOSK else False
 
 AGENT_AUDIO = True if VOICE and PIPER else False
-AGENT_SPEAKING = AGENT_AUDIO
+AGENT_SPEAKING = False
 
 user_speech_queue = queue.Queue()
 agent_speech_queue = queue.Queue()
@@ -36,19 +39,18 @@ def get_sample_rate(voice_path=VOICE):
         data = json.load(f)
     return data["audio"]["sample_rate"]
 
-def play_audio(raw_audio, sample_rate):
-    audio = np.frombuffer(raw_audio, dtype=np.int16)
-    sd.play(audio, samplerate=sample_rate)
-    sd.wait()
-
 def audio_worker(sample_rate):
-    while (audio := agent_speech_queue.get()) or AGENT_SPEAKING:
+    global AGENT_SPEAKING
+
+    while True:
+        audio = agent_speech_queue.get()
         if audio is None:
+            AGENT_SPEAKING = False
+            agent_speech_queue.task_done()
             continue
         data = np.frombuffer(audio, dtype=np.int16)
         sd.play(data, samplerate=sample_rate)
         sd.wait()
-        agent_speech_queue.task_done()
 
 def play_audio_async(audio):
     agent_speech_queue.put(audio)
@@ -64,16 +66,27 @@ def get_audio_data(text: str, voice_path=VOICE):
     return audio
 
 def start_listener(model_path):
+    input_device = sd.query_devices(kind='input')
+    sample_rate = int(input_device['default_samplerate'])
+    g = gcd(sample_rate, TARGET_RATE)
+    up = TARGET_RATE // g
+    down = sample_rate // g
+    print("Loading Vosk model...")
     model = Model(model_path)
-    recognizer = KaldiRecognizer(model, 16000)
+    print("Loaded.")
+    recognizer = KaldiRecognizer(model, TARGET_RATE)
 
-    def callback(indata, frames, time, status):
-        volume = np.abs(indata).mean()
+    def callback(indata, frames, time, status):        
+        audio = np.frombuffer(indata, dtype=np.int16)
+        volume = np.abs(audio).mean()
 
         if volume < 50 or AGENT_SPEAKING:  # tune this number
             return
 
-        if recognizer.AcceptWaveform(bytes(indata)):
+        if sample_rate != TARGET_RATE:
+            audio = resample_poly(audio, up, down)
+
+        if recognizer.AcceptWaveform(audio.astype(np.int16).tobytes()):
             result = json.loads(recognizer.Result())
             text = result.get("text", "").strip()
             if text:
@@ -82,10 +95,8 @@ def start_listener(model_path):
             # Partial results
             pass
 
-    input_device = sd.query_devices(kind='input')
-    sample_rate = int(input_device['default_samplerate'])
-
     def listen():
+        stop_event = threading.Event()
         with sd.RawInputStream(
             samplerate=sample_rate,
             blocksize=4000,
@@ -93,8 +104,8 @@ def start_listener(model_path):
             channels=1,
             callback=callback
         ):
-            while True:
-                pass
+            while not stop_event.is_set():
+                stop_event.wait(0.5)
 
     threading.Thread(target=listen, daemon=True).start()
 
@@ -103,6 +114,7 @@ class testCallbacks(Callbacks):
         self.messages = messages or []
         self.buffer = ""
         self.speaking = speaking
+        self.thread = None
     
     def on_token(self, token: str):
         if self.speaking:
@@ -126,14 +138,15 @@ class testCallbacks(Callbacks):
     def on_complete(self):
         if self.speaking:
             self.speak()
-            global AGENT_SPEAKING
-            AGENT_SPEAKING = False
+            agent_speech_queue.put(None)
     
     def on_start(self):
         if self.speaking:
             global AGENT_SPEAKING
             AGENT_SPEAKING = True
-            threading.Thread(target=audio_worker, args=(get_sample_rate(),), daemon=True).start()
+            if self.thread is None or not self.thread.is_alive():
+                self.thread = threading.Thread(target=audio_worker, args=(get_sample_rate(),), daemon=True)
+                self.thread.start()
 
 def run_agent(
     user_message: str,
@@ -247,11 +260,15 @@ def run_agent(
 if __name__ == "__main__":
     model_name = sys.argv[1] if len(sys.argv) > 1 else ""
 
-    callbacks = testCallbacks(speaking=False)
+    callbacks = testCallbacks(speaking=AGENT_AUDIO)
     if USER_AUDIO:
         start_listener(VOSK)
         while True:
-            text = user_speech_queue.get()
+            try:
+                text = user_speech_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            print(text, flush=True)
             run_agent(text, callbacks.messages, callbacks, model_name=model_name)
     else:
         while (inp:=input("> ")):
