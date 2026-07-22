@@ -15,18 +15,6 @@ def web_search(query: str):
     with DDGS() as ddgs:
         return str(ddgs.text(query, max_results=10))
 
-# tools = {
-#     "ls": {
-#         "schema": {
-#             "name": "ls",
-#             "description": "Lists the current directory",
-#             "parameters": {}
-#         },
-#         "fn": ls,
-#         "needs_approval": False
-#     }
-# }
-
 class tool:
     def __init__(self, fn: callable, description: str, needs_approval = False):
         self.fn, self.description, self.needs_approval = fn, description, needs_approval
