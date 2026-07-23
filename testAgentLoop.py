@@ -8,11 +8,13 @@ import subprocess
 import json
 import threading
 import queue
-from vosk import Model, KaldiRecognizer
 import os
 import sys
 from scipy.signal import resample_poly
 from math import gcd
+import wave
+import tempfile
+from faster_whisper import WhisperModel
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -22,10 +24,15 @@ DEFAULT_MODEL = "qwen2.5"
 
 VOICE = os.getenv("VOICE_PATH")
 # If PIPER_PATH isn't set, assume the system-wide 'piper' command (Linux)
-PIPER = os.getenv("PIPER_PATH", "piper") 
-VOSK = os.getenv("VOSK_PATH")
+PIPER = os.getenv("PIPER_PATH", "piper")
 
-USER_AUDIO = True if VOSK else False
+USER_AUDIO = bool(os.getenv("USER_AUDIO", "True"))
+
+model = WhisperModel(
+    "base.en",
+    device="cpu",
+    compute_type="int8"
+)
 
 AGENT_AUDIO = True if VOICE and PIPER else False
 AGENT_SPEAKING = False
@@ -65,49 +72,108 @@ def get_audio_data(text: str, voice_path=VOICE):
     audio, _ = process.communicate(text.encode("utf-8"))
     return audio
 
-def start_listener(model_path):
-    input_device = sd.query_devices(kind='input')
-    sample_rate = int(input_device['default_samplerate'])
-    g = gcd(sample_rate, TARGET_RATE)
-    up = TARGET_RATE // g
-    down = sample_rate // g
-    print("Loading Vosk model...")
-    model = Model(model_path)
-    print("Loaded.")
-    recognizer = KaldiRecognizer(model, TARGET_RATE)
+def transcribe(audio, samplerate):
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        filename = f.name
 
-    def callback(indata, frames, time, status):        
-        audio = np.frombuffer(indata, dtype=np.int16)
-        volume = np.abs(audio).mean()
+    with wave.open(filename, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)  # int16
+        wav.setframerate(samplerate)
+        wav.writeframes(audio.tobytes())
 
-        if volume < 50 or AGENT_SPEAKING:  # tune this number
+    segments, _ = model.transcribe(filename)
+
+    text = "".join(
+        segment.text for segment in segments
+    )
+
+    os.remove(filename)
+
+    return text.strip()
+
+def start_listener():
+
+    input_device = sd.query_devices(kind="input")
+    sample_rate = int(input_device["default_samplerate"])
+
+    silence_threshold = 10
+    silence_time = 2
+
+    recording = False
+    silence = 0
+    frames = []
+
+    def callback(indata, frames_count, time, status):
+        nonlocal recording, silence, frames
+
+        if AGENT_SPEAKING:
             return
+        
+        g = gcd(sample_rate, TARGET_RATE)
+        up = TARGET_RATE // g
+        down = sample_rate // g
+
+        audio = np.frombuffer(indata, dtype=np.int16).copy()
 
         if sample_rate != TARGET_RATE:
             audio = resample_poly(audio, up, down)
+            audio = audio.astype(np.int16)
 
-        if recognizer.AcceptWaveform(audio.astype(np.int16).tobytes()):
-            result = json.loads(recognizer.Result())
-            text = result.get("text", "").strip()
-            if text:
-                user_speech_queue.put(text)
+        volume = np.abs(audio).mean()
+
+        if recording:
+
+            frames.append(audio)
+
+            if volume < silence_threshold:
+                silence += len(audio)
+            else:
+                silence = 0
+
+            if silence > sample_rate * silence_time:
+
+                recording = False
+
+                speech = np.concatenate(frames)
+
+                frames = []
+                silence = 0
+
+                threading.Thread(
+                    target=transcribe_worker,
+                    args=(speech, sample_rate),
+                    daemon=True
+                ).start()
+
         else:
-            # Partial results
-            pass
+
+            if volume > silence_threshold:
+                recording = True
+                frames = [audio]
+                silence = 0
 
     def listen():
-        stop_event = threading.Event()
+        stop = threading.Event()
+
         with sd.RawInputStream(
             samplerate=sample_rate,
-            blocksize=4000,
-            dtype='int16',
             channels=1,
-            callback=callback
+            dtype="int16",
+            callback=callback,
+            blocksize=2048,
         ):
-            while not stop_event.is_set():
-                stop_event.wait(0.5)
+            while not stop.is_set():
+                stop.wait(0.2)
 
     threading.Thread(target=listen, daemon=True).start()
+
+def transcribe_worker(audio, samplerate):
+
+    text = transcribe(audio, samplerate)
+
+    if text:
+        user_speech_queue.put(text)
 
 class testCallbacks(Callbacks):
     def __init__(self, messages: list = None, speaking=True):
@@ -262,13 +328,14 @@ if __name__ == "__main__":
 
     callbacks = testCallbacks(speaking=AGENT_AUDIO)
     if USER_AUDIO:
-        start_listener(VOSK)
+        start_listener()
+        print("Ready.")
         while True:
             try:
                 text = user_speech_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            print(text, flush=True)
+            print("You: ", text, flush=True)
             run_agent(text, callbacks.messages, callbacks, model_name=model_name)
     else:
         while (inp:=input("> ")):
