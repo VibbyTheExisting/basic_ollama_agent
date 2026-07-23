@@ -27,9 +27,10 @@ VOICE = os.getenv("VOICE_PATH")
 PIPER = os.getenv("PIPER_PATH", "piper")
 
 USER_AUDIO = bool(os.getenv("USER_AUDIO", "True"))
+MODEL_NAME = os.getenv("MODEL_NAME", "tiny.en")
 
 model = WhisperModel(
-    "base.en",
+    MODEL_NAME,
     device="cpu",
     compute_type="int8"
 )
