@@ -1,4 +1,4 @@
-from callbacks import Callbacks
+from callbacks import Callbacks, ListenerCallbacks
 import numpy as np
 import sounddevice as sd
 import subprocess
@@ -109,13 +109,21 @@ def get_audio_data(text: str, voice_path=VOICE):
     audio, _ = process.communicate(text.encode("utf-8"))
     return audio
 
-def listen_callback(text: str):
-    if AGENT_SPEAKING:
-        check_stop_command(text)
-    else:
-        user_speech_queue.put(text)
+class mainListenerCallbacks(ListenerCallbacks):
+    def __init__(self):
+        self.interrupt_mode = False
 
-class testCallbacks(Callbacks):
+    def start(self):
+        self.interrupt_mode = AGENT_SPEAKING
+
+    def on_text(self, text):
+        if self.interrupt_mode:
+            check_stop_command(text)
+        else:
+            user_speech_queue.put(text)
+
+
+class mainCallbacks(Callbacks):
     def __init__(self, messages: list = None, speaking=True):
         self.messages = messages or []
         self.buffer = ""
@@ -166,8 +174,9 @@ class testCallbacks(Callbacks):
 if __name__ == "__main__":
     model_name = sys.argv[1] if len(sys.argv) > 1 else ""
 
-    callbacks = testCallbacks(speaking=AGENT_AUDIO)
+    callbacks = mainCallbacks(speaking=AGENT_AUDIO)
     if USER_AUDIO:
+        listen_callback = mainListenerCallbacks()
         start_listener(listen_callback)
         while True:
             try:

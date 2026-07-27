@@ -6,6 +6,7 @@ import numpy as np
 import threading
 import speech_recognition as sr
 from recording import recorder
+from callbacks import ListenerCallbacks
 
 rec = sr.Recognizer()
 history = None
@@ -26,7 +27,7 @@ def enable_history():
     global history_enabled
     history_enabled = True
 
-def listen(callback: callable = lambda x: None):
+def listen(callback: ListenerCallbacks):
     global history, SAMPLE_RATE
 
     BLOCK_SIZE = 4096
@@ -70,6 +71,7 @@ def listen(callback: callable = lambda x: None):
 
             if not recording:
                 if volume > THRESHOLD:
+                    callback.start()
                     print("Recording...")
                     recording = True
 
@@ -120,7 +122,7 @@ def listen(callback: callable = lambda x: None):
                 ).strip()
 
                 if text:
-                    callback(text)
+                    callback.on_text(text)
 
             except sr.UnknownValueError:
                 # Speech detected but not understood
@@ -132,5 +134,5 @@ def listen(callback: callable = lambda x: None):
             except Exception as e:
                 print(f"Recognition error: {e}")
 
-def start_listener(callback: callable):
+def start_listener(callback: ListenerCallbacks):
     threading.Thread(target=listen, args=(callback,), daemon=True).start()

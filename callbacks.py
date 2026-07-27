@@ -7,3 +7,7 @@ class Callbacks:
     def on_tool_approval(self, name: str, args: list): pass
     def on_complete(self): pass
     def on_start(self): pass
+
+class ListenerCallbacks:
+    def start(self): pass
+    def on_text(self): pass
