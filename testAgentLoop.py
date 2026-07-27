@@ -77,7 +77,7 @@ def listen():
     input_device = sd.query_devices(kind="input")
     SAMPLE_RATE = int(input_device["default_samplerate"])
 
-    BLOCK_SIZE = 2048
+    BLOCK_SIZE = 4096
     THRESHOLD = 200          # Needs to be tuned
     SILENCE_TIME = 0.8       # Silence duration before processing
     MIN_SECONDS = 0.3        # Ignore very short sounds
