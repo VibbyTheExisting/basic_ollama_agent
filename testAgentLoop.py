@@ -8,11 +8,12 @@ import subprocess
 import json
 import threading
 import queue
-from vosk import Model, KaldiRecognizer
 import os
 import sys
-from scipy.signal import resample_poly
-from math import gcd
+import speech_recognition as sr
+import io
+import scipy.io.wavfile as wav
+import time
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -23,9 +24,13 @@ DEFAULT_MODEL = "qwen2.5"
 VOICE = os.getenv("VOICE_PATH")
 # If PIPER_PATH isn't set, assume the system-wide 'piper' command (Linux)
 PIPER = os.getenv("PIPER_PATH", "piper") 
-VOSK = os.getenv("VOSK_PATH")
 
-USER_AUDIO = True if VOSK else False
+USER_AUDIO = True
+try:
+    rec = sr.Recognizer()
+except Exception as e:
+    print(e)
+    USER_AUDIO = False
 
 AGENT_AUDIO = True if VOICE and PIPER else False
 AGENT_SPEAKING = False
@@ -65,48 +70,102 @@ def get_audio_data(text: str, voice_path=VOICE):
     audio, _ = process.communicate(text.encode("utf-8"))
     return audio
 
-def start_listener(model_path):
-    input_device = sd.query_devices(kind='input')
-    sample_rate = int(input_device['default_samplerate'])
-    g = gcd(sample_rate, TARGET_RATE)
-    up = TARGET_RATE // g
-    down = sample_rate // g
-    print("Loading Vosk model...")
-    model = Model(model_path)
-    print("Loaded.")
-    recognizer = KaldiRecognizer(model, TARGET_RATE)
+def listen():
+    global AGENT_SPEAKING
 
-    def callback(indata, frames, time, status):        
-        audio = np.frombuffer(indata, dtype=np.int16)
+    SAMPLE_RATE = 16000
+    BLOCK_SIZE = 1024
+    THRESHOLD = 200          # Increase if it triggers too easily
+    SILENCE_TIME = 0.8       # Seconds of silence before sending
+
+    silent_blocks_required = int(SILENCE_TIME * SAMPLE_RATE / BLOCK_SIZE)
+
+    stream = sd.InputStream(
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="int16",
+        blocksize=BLOCK_SIZE
+    )
+
+    stream.start()
+
+    recording = False
+    frames = []
+    silent_blocks = 0
+
+    print("Listening...")
+
+    while True:
+        if AGENT_SPEAKING:
+            recording = False
+            frames.clear()
+            silent_blocks = 0
+            time.sleep(0.1)
+            continue
+
+        audio, overflowed = stream.read(BLOCK_SIZE)
+
+        if overflowed:
+            print("Audio overflow!")
+
+        audio = audio.flatten()
+
         volume = np.abs(audio).mean()
+        # print(volume)   # Uncomment for threshold tuning
 
-        if volume < 50 or AGENT_SPEAKING:  # tune this number
-            return
+        if not recording:
+            if volume > THRESHOLD:
+                print("Recording...")
+                recording = True
+                frames = [audio.copy()]
+                silent_blocks = 0
+            continue
 
-        if sample_rate != TARGET_RATE:
-            audio = resample_poly(audio, up, down)
+        # Already recording
+        frames.append(audio.copy())
 
-        if recognizer.AcceptWaveform(audio.astype(np.int16).tobytes()):
-            result = json.loads(recognizer.Result())
-            text = result.get("text", "").strip()
+        if volume > THRESHOLD:
+            silent_blocks = 0
+        else:
+            silent_blocks += 1
+
+        if silent_blocks < silent_blocks_required:
+            continue
+
+        print("Processing...")
+
+        recording = False
+        silent_blocks = 0
+
+        recording_audio = np.concatenate(frames)
+        frames.clear()
+
+        buffer = io.BytesIO()
+        wav.write(buffer, SAMPLE_RATE, recording_audio)
+        buffer.seek(0)
+
+        try:
+            with sr.AudioFile(buffer) as source:
+                audio_data = rec.record(source)
+
+            text = rec.recognize_google(
+                audio_data,
+                language="en-US"
+            ).strip()
+
             if text:
                 user_speech_queue.put(text)
-        else:
-            # Partial results
+
+        except sr.UnknownValueError:
             pass
 
-    def listen():
-        stop_event = threading.Event()
-        with sd.RawInputStream(
-            samplerate=sample_rate,
-            blocksize=4000,
-            dtype='int16',
-            channels=1,
-            callback=callback
-        ):
-            while not stop_event.is_set():
-                stop_event.wait(0.5)
+        except sr.RequestError as e:
+            print(f"Speech recognition error: {e}")
 
+        except Exception as e:
+            print(e)
+
+def start_listener():
     threading.Thread(target=listen, daemon=True).start()
 
 class testCallbacks(Callbacks):
@@ -262,13 +321,13 @@ if __name__ == "__main__":
 
     callbacks = testCallbacks(speaking=AGENT_AUDIO)
     if USER_AUDIO:
-        start_listener(VOSK)
+        start_listener()
         while True:
             try:
                 text = user_speech_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            print(text, flush=True)
+            print("You:", text, flush=True)
             run_agent(text, callbacks.messages, callbacks, model_name=model_name)
     else:
         while (inp:=input("> ")):
