@@ -14,6 +14,7 @@ import speech_recognition as sr
 import io
 import scipy.io.wavfile as wav
 import time
+from collections import deque
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -22,7 +23,7 @@ TARGET_RATE = 16000
 DEFAULT_MODEL = "qwen2.5"
 
 VOICE = os.getenv("VOICE_PATH")
-# If PIPER_PATH isn't set, assume the system-wide 'piper' command (Linux)
+# If PIPER_PATH isn't set, assume the system-wide 'piper' command (Linux python implementation)
 PIPER = os.getenv("PIPER_PATH", "piper") 
 
 USER_AUDIO = True
@@ -73,97 +74,122 @@ def get_audio_data(text: str, voice_path=VOICE):
 def listen():
     global AGENT_SPEAKING
 
-    SAMPLE_RATE = 16000
-    BLOCK_SIZE = 1024
-    THRESHOLD = 200          # Increase if it triggers too easily
-    SILENCE_TIME = 0.8       # Seconds of silence before sending
+    input_device = sd.query_devices(kind="input")
+    SAMPLE_RATE = int(input_device["default_samplerate"])
 
-    silent_blocks_required = int(SILENCE_TIME * SAMPLE_RATE / BLOCK_SIZE)
+    BLOCK_SIZE = 2048
+    THRESHOLD = 200          # Needs to be tuned
+    SILENCE_TIME = 0.8       # Silence duration before processing
+    MIN_SECONDS = 0.3        # Ignore very short sounds
+    PRE_ROLL_BLOCKS = 5      # Around 100-300ms
 
-    stream = sd.InputStream(
+    silent_blocks_required = int(
+        SILENCE_TIME * SAMPLE_RATE / BLOCK_SIZE
+    )
+
+    history = deque(maxlen=PRE_ROLL_BLOCKS)
+
+    print(f"Listening at {SAMPLE_RATE}Hz...")
+
+    with sd.InputStream(
         samplerate=SAMPLE_RATE,
         channels=1,
         dtype="int16",
         blocksize=BLOCK_SIZE
-    )
-
-    stream.start()
-
-    recording = False
-    frames = []
-    silent_blocks = 0
-
-    print("Listening...")
-
-    while True:
-        if AGENT_SPEAKING:
-            recording = False
-            frames.clear()
-            silent_blocks = 0
-            time.sleep(0.1)
-            continue
-
-        audio, overflowed = stream.read(BLOCK_SIZE)
-
-        if overflowed:
-            print("Audio overflow!")
-
-        audio = audio.flatten()
-
-        volume = np.abs(audio).mean()
-        # print(volume)   # Uncomment for threshold tuning
-
-        if not recording:
-            if volume > THRESHOLD:
-                print("Recording...")
-                recording = True
-                frames = [audio.copy()]
-                silent_blocks = 0
-            continue
-
-        # Already recording
-        frames.append(audio.copy())
-
-        if volume > THRESHOLD:
-            silent_blocks = 0
-        else:
-            silent_blocks += 1
-
-        if silent_blocks < silent_blocks_required:
-            continue
-
-        print("Processing...")
+    ) as stream:
 
         recording = False
+        frames = []
         silent_blocks = 0
 
-        recording_audio = np.concatenate(frames)
-        frames.clear()
+        while True:
+            if AGENT_SPEAKING:
+                recording = False
+                frames.clear()
+                history.clear()
+                silent_blocks = 0
+                time.sleep(0.1)
+                continue
 
-        buffer = io.BytesIO()
-        wav.write(buffer, SAMPLE_RATE, recording_audio)
-        buffer.seek(0)
+            audio, overflowed = stream.read(BLOCK_SIZE)
 
-        try:
-            with sr.AudioFile(buffer) as source:
-                audio_data = rec.record(source)
+            if overflowed:
+                print("Audio overflow")
+                # recording = False
+                # frames.clear()
+                # history.clear()
+                # silent_blocks = 0
+                # continue
 
-            text = rec.recognize_google(
-                audio_data,
-                language="en-US"
-            ).strip()
+            audio = audio.flatten()
+            history.append(audio.copy())
 
-            if text:
-                user_speech_queue.put(text)
+            volume = np.abs(audio).mean()
+            # print(volume)  # Uncomment to tune THRESHOLD
 
-        except sr.UnknownValueError:
-            pass
+            if not recording:
+                if volume > THRESHOLD:
+                    print("Recording...")
+                    recording = True
 
-        except sr.RequestError as e:
-            print(f"Speech recognition error: {e}")
+                    # Include audio immediately before speech started
+                    frames = list(history)
 
-        except Exception as e:
-            print(e)
+                    silent_blocks = 0
+
+                continue
+
+            # Already recording
+            frames.append(audio.copy())
+
+            if volume > THRESHOLD:
+                silent_blocks = 0
+            else:
+                silent_blocks += 1
+
+            if silent_blocks < silent_blocks_required:
+                continue
+
+            print("Processing...")
+
+            recording = False
+            silent_blocks = 0
+
+            recording_audio = np.concatenate(frames)
+            frames.clear()
+            history.clear()
+
+            # Ignore accidental taps/clicks/noise
+            if len(recording_audio) < SAMPLE_RATE * MIN_SECONDS:
+                continue
+
+            recording_audio = recording_audio.astype(np.int16)
+
+            buffer = io.BytesIO()
+            wav.write(buffer, SAMPLE_RATE, recording_audio)
+            buffer.seek(0)
+
+            try:
+                with sr.AudioFile(buffer) as source:
+                    audio_data = rec.record(source)
+
+                text = rec.recognize_google(
+                    audio_data,
+                    language="en-US"
+                ).strip()
+
+                if text:
+                    user_speech_queue.put(text)
+
+            except sr.UnknownValueError:
+                # Speech detected but not understood
+                pass
+
+            except sr.RequestError as e:
+                print(f"Speech recognition error: {e}")
+
+            except Exception as e:
+                print(f"Recognition error: {e}")
 
 def start_listener():
     threading.Thread(target=listen, daemon=True).start()
