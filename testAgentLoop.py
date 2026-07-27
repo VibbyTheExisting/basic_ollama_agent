@@ -78,7 +78,7 @@ def listen():
     SAMPLE_RATE = int(input_device["default_samplerate"])
 
     BLOCK_SIZE = 4096
-    THRESHOLD = 200          # Needs to be tuned
+    THRESHOLD = 150          # Needs to be tuned
     SILENCE_TIME = 0.8       # Silence duration before processing
     MIN_SECONDS = 0.3        # Ignore very short sounds
     PRE_ROLL_BLOCKS = 5      # Around 100-300ms
