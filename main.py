@@ -9,7 +9,7 @@ import os
 import sys
 import time
 from run import run_agent
-from listener import start_listener
+from listener import start_listener, clear_history
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -92,6 +92,7 @@ def audio_worker(sample_rate):
                 time.sleep(0.05)
 
             sd.wait()
+            clear_history()
         except Exception as e:
             print(e)
 

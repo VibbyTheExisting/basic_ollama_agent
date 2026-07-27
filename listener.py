@@ -6,14 +6,25 @@ import numpy as np
 import threading
 import speech_recognition as sr
 
-try:
-    rec = sr.Recognizer()
-except Exception as e:
-    print(e)
-    USER_AUDIO = False
+rec = sr.Recognizer()
+history = None
+history_enabled = True
+
+def clear_history():
+    global history_enabled
+
+    history_enabled = False
+    if history is not None:
+        history.clear()
+
+    threading.Timer(0.3, enable_history).start()
+
+def enable_history():
+    global history_enabled
+    history_enabled = True
 
 def listen(callback: callable = lambda x: None):
-    global AGENT_SPEAKING
+    global history
 
     input_device = sd.query_devices(kind="input")
     SAMPLE_RATE = int(input_device["default_samplerate"])
@@ -51,7 +62,7 @@ def listen(callback: callable = lambda x: None):
                 print("Audio overflow")
 
             audio = audio.flatten()
-            history.append(audio.copy())
+            if history_enabled and not recording: history.append(audio.copy())
 
             volume = np.abs(audio).mean()
             # print(volume)  # Uncomment to tune THRESHOLD
