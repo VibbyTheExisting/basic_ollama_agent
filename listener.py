@@ -5,10 +5,13 @@ import sounddevice as sd
 import numpy as np
 import threading
 import speech_recognition as sr
+from recording import recorder
 
 rec = sr.Recognizer()
 history = None
 history_enabled = True
+input_device = sd.query_devices(kind="input")
+SAMPLE_RATE = int(input_device["default_samplerate"])
 
 def clear_history():
     global history_enabled
@@ -24,10 +27,7 @@ def enable_history():
     history_enabled = True
 
 def listen(callback: callable = lambda x: None):
-    global history
-
-    input_device = sd.query_devices(kind="input")
-    SAMPLE_RATE = int(input_device["default_samplerate"])
+    global history, SAMPLE_RATE
 
     BLOCK_SIZE = 4096
     THRESHOLD = 150          # Needs to be tuned
@@ -62,6 +62,7 @@ def listen(callback: callable = lambda x: None):
                 print("Audio overflow")
 
             audio = audio.flatten()
+            recorder.add_frame(audio)
             if history_enabled and not recording: history.append(audio.copy())
 
             volume = np.abs(audio).mean()

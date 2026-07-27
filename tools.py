@@ -1,19 +1,18 @@
-import os
 import inspect
 from ddgs import DDGS
+from recording import recorder
+from listener import SAMPLE_RATE
 
-def ls():
-    return str(os.listdir())
-
-def read_file(file_name: str):
-    try:
-        return open(file_name, "r").read()
-    except FileNotFoundError:
-        return "No file found."
-
+### CURRENTLY, THE AGENT DOES NOT HAVE ACCESS TO THIS
 def web_search(query: str):
     with DDGS() as ddgs:
         return str(ddgs.text(query, max_results=10))
+    
+def start_recording():
+    recorder.start(SAMPLE_RATE)
+
+def stop_recording():
+    recorder.stop()
 
 class tool:
     def __init__(self, fn: callable, description: str, needs_approval = False):
@@ -55,5 +54,5 @@ def build_tools(tools: list[tool]):
         t.fn.__name__: t.get_schema() for t in tools
     }
 
-raw_tools = [tool(ls, "Lists the current directory", False), tool(read_file, "Read a file at the specified file path", False), tool(web_search, "Search the web for a query.", False)]
+raw_tools = [tool(start_recording, "Start a recording of the room.", False), tool(stop_recording, "Stop a recording of the room.", False)]
 tools = build_tools(raw_tools)
